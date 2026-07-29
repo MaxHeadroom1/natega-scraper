@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -29,13 +30,12 @@ def get_result():
             'Referer': 'https://natega.elwatannews.com/'
         }
 
-        # 1. إرسال طلب POST المباشر لمسار نتيجة الوطن
+        # 1. طلب POST المباشر
         post_url = "https://natega.elwatannews.com/Result/1"
         payload = {'seating_no': seating_no}
 
         response = session.post(post_url, data=payload, headers=headers, timeout=15)
 
-        # لو لم يستجب مسار POST، نأخذ رابط الاستعلام الاحتياطي
         if response.status_code != 200 or len(response.text) < 500:
             search_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
             response = session.get(search_url, headers=headers, timeout=15)
@@ -49,24 +49,37 @@ def get_result():
             total_marks = "غير متوفر"
             subjects = []
 
-            # استخراج اسم الطالب والشعبة والمجموع من الصفحة
-            # البحث في النصوص والـ Tags المشهورة بصفحة الوطن
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td', 'th']):
-                text = tag.get_text(strip=True)
-                if ("اسم الطالب" in text or "الأسم" in text or "الاسم" in text) and student_name == "غير متوفر":
-                    parts = text.split(":")
-                    if len(parts) > 1:
-                        student_name = parts[1].strip()
-                elif "الشعبة" in text and branch == "غير متوفر":
-                    parts = text.split(":")
-                    if len(parts) > 1:
-                        branch = parts[1].strip()
-                elif ("المجموع الكلي" in text or "المجموع" in text) and total_marks == "غير متوفر":
-                    parts = text.split(":")
-                    if len(parts) > 1:
-                        total_marks = parts[1].strip()
+            # 1. تنظيف ودقة استخراج الاسم والشعبة من الـ Elements المباشرة
+            for el in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td', 'th', 'b', 'strong']):
+                txt = el.get_text(strip=True)
+                
+                # استخراج الاسم
+                if ("اسم الطالب" in txt or "الأسم" in txt or "الاسم" in txt) and student_name == "غير متوفر":
+                    # تنظيف النص
+                    clean_txt = re.sub(r'^(اسم الطالب|الأسم|الاسم)\s*:\s*', '', txt)
+                    # قطع النص لو اشتبك مع كلمة حالة أو شعبة
+                    clean_txt = re.split(r'(حالة|الشعبة|رقم|المجموع)', clean_txt)[0].strip()
+                    if clean_txt and len(clean_txt) > 3:
+                        student_name = clean_txt
 
-            # استخراج جدول الدرجات بالكامل
+                # استخراج الشعبة
+                if "الشعبة" in txt and branch == "غير متوفر":
+                    clean_branch = re.sub(r'^الشعبة\s*:\s*', '', txt)
+                    clean_branch = re.split(r'(حالة|الاسم|الأسم|رقم|المجموع)', clean_branch)[0].strip()
+                    if clean_branch and len(clean_branch) > 2:
+                        branch = clean_branch
+
+            # إذا لم يجد الشعبة صراحة، يتم الاستدلال عليها من المواد
+            if branch == "غير متوفر":
+                page_full_text = soup.get_text()
+                if "الرياضيات البحتة" in page_full_text or "مجموع الرياضيات" in page_full_text:
+                    branch = "علمي رياضة"
+                elif "الأحياء" in page_full_text and "غير مقرر" not in page_full_text:
+                    branch = "علمي علوم"
+                elif "التاريخ" in page_full_text and "غير مقرر" not in page_full_text:
+                    branch = "أدبي"
+
+            # 2. استخراج جدول المواد والدرجات
             for tr in soup.find_all('tr'):
                 tds = tr.find_all(['td', 'th'])
                 if len(tds) >= 2:
@@ -77,16 +90,16 @@ def get_result():
                     percentage_val = row_texts[2] if len(row_texts) > 2 else ""
 
                     # تجاهل صف عناوين الجدول
-                    if any(h in sub_name for h in ["المادة", "الدرجة", "النسبة", "اسم"]):
+                    if any(h in sub_name for h in ["المادة", "الدرجة", "النسبة", "رقم الجلوس"]):
                         continue
 
-                    # لو السطر يمثل المجموع الكلي
-                    if "المجموع" in sub_name:
+                    # استخراج المجموع الكلي
+                    if "المجموع" in sub_name or "المجموع الكلي" in sub_name:
                         total_marks = score_val
                         continue
 
                     # إضافة المادة للقائمة
-                    if sub_name and score_val:
+                    if sub_name and score_val and not any(s['subject'] == sub_name for s in subjects):
                         subjects.append({
                             "subject": sub_name,
                             "score": score_val,
