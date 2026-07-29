@@ -26,83 +26,89 @@ def get_result():
             'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
         }
 
+        # نرسل طلب البحث المباشر
         search_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
         response = session.get(search_url, headers=headers, timeout=15, allow_redirects=True)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
+            # 1. استخراج اسم الطالب والشعبة وحالة النتيجة
             student_name = "غير متوفر"
             branch = "غير متوفر"
-            status_student = "ناجح"
+            student_status = "ناجح"
             total_marks = "غير متوفر"
+
+            # فحص كامل عناصر النص في الصفحة
+            full_text = soup.get_text()
+
+            # استخراج الاسم ببحث مباشر عن الأسم/الاسم
+            for el in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'b', 'strong']):
+                txt = el.text.strip()
+                if ("الأسم:" in txt or "الاسم:" in txt) and len(txt) < 100:
+                    student_name = txt.replace("الأسم:", "").replace("الاسم:", "").strip()
+                    break
+
+            # استخراج الشعبة
+            for el in soup.find_all(['div', 'p', 'span', 'td']):
+                txt = el.text.strip()
+                if "الشعبة:" in txt and len(txt) < 60:
+                    branch = txt.replace("الشعبة:", "").strip()
+                    break
+
+            # 2. استخراج جدول المواد بالكامل (شامل المواد المقررة وغير المقررة)
             subjects = []
-
-            # 1. استخراج النصوص والمسميات الأساسية
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'strong']):
-                txt = tag.text.strip()
-                if ("الأسم:" in txt or "الاسم:" in txt) and student_name == "غير متوفر":
-                    # يستخرج الجزء بعد الكلمة
-                    student_name = txt.split(":")[-1].strip()
-                elif "الشعبة:" in txt and branch == "غير متوفر":
-                    branch = txt.split(":")[-1].strip()
-                elif "حالة الطالب:" in txt:
-                    status_student = txt.split(":")[-1].strip()
-
-            # 2. قراءة درجات المواد من السطور أو الجداول
-            # البحث عن جميع الصفوف <tr> أو مجموعات البيانات <div> التي تحتوي على درجات
-            rows = soup.find_all(['tr', 'div'], class_=lambda c: c and any(x in str(c).lower() for x in ['row', 'subject', 'item', 'result']))
             
-            # إذا لم توجد كلاسات محددة، نمر على كل الصفوف <tr> في الصفحة
-            if not rows:
-                rows = soup.find_all('tr')
+            # البحث عن جميع الجداول في الصفحة
+            tables = soup.find_all('table')
+            
+            # إذا لم يجد جدول <table> صريح، يبحث عن صفوف التنسيق Standard
+            rows = []
+            if tables:
+                for t in tables:
+                    rows.extend(t.find_all('tr'))
+            else:
+                rows = soup.find_all(['tr', 'div'], class_=lambda c: c and any(k in str(c).lower() for k in ['row', 'item', 'subject', 'table']))
 
             for row in rows:
                 cols = [c.text.strip() for c in row.find_all(['td', 'th', 'div', 'span']) if c.text.strip()]
-                # نقوم بتصفية العناصر لضمان وجود مادة ودرجة
+                
+                # تصفية الصفوف المزدوجة والتأكد من وجود اسم مادة ودرجة
                 if len(cols) >= 2:
-                    first_col = cols[0]
-                    # تخطي رؤوس الجداول أو العناوين
-                    if any(header_word in first_col for header_word in ["المادة", "الدرجة", "النسبة", "اسم"]):
-                        continue
-                    
-                    if "المجموع" in first_col or "المجموع الكلي" in first_col:
-                        total_marks = cols[1]
-                    else:
-                        # إضافة المادة للكتلة
-                        subject_name = cols[0]
-                        score = cols[1]
-                        percentage = cols[2] if len(cols) > 2 else ""
-                        
-                        # منع تكرار نفس المادة في القائمة
-                        if not any(s['subject'] == subject_name for s in subjects):
-                            subjects.append({
-                                "subject": subject_name,
-                                "score": score,
-                                "percentage": percentage
-                            })
+                    sub_name = cols[0]
+                    score_val = cols[1]
+                    percentage_val = cols[2] if len(cols) > 2 else ""
 
-            # 3. محاولة احتياطية لجلب المجموع في حال لم يظهر في السطور
-            if total_marks == "غير متوفر":
-                for tag in soup.find_all(['div', 'p', 'span', 'td', 'h4']):
-                    txt = tag.text.strip()
-                    if "المجموع" in txt and len(txt) < 40:
-                        total_marks = txt
-                        break
+                    # تجاهل العناوين الرئيسية
+                    if any(header in sub_name for header in ["المادة", "الدرجة", "النسبة", "رقم الجلوس"]):
+                        continue
+
+                    # إذا كان الصف للمجموع الكلي
+                    if "المجموع" in sub_name or "المجموع الكلي" in sub_name:
+                        total_marks = score_val
+                    else:
+                        # التأكد من عدم تكرار إضافة المادة
+                        if not any(s['subject'] == sub_name for s in subjects):
+                            subjects.append({
+                                "subject": sub_name,
+                                "score": score_val,
+                                "percentage": percentage_val,
+                                "is_optional": "غير مقرر" in score_val
+                            })
 
             return jsonify({
                 "status": "success",
                 "seating_no": seating_no,
                 "name": student_name,
                 "branch": branch,
-                "student_status": status_student,
+                "student_status": student_status,
                 "total": total_marks,
                 "subjects": subjects
             })
         else:
             return jsonify({
                 "status": "error", 
-                "message": f"تعذر الاتصال بالموقع المستهدف (رمز: {response.status_code})"
+                "message": f"تعذر الاتصال بالموقع (رمز: {response.status_code})"
             }), 502
 
     except Exception as e:
