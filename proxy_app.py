@@ -30,7 +30,6 @@ def get_result():
             'Referer': 'https://natega.elwatannews.com/'
         }
 
-        # 1. طلب POST المباشر
         post_url = "https://natega.elwatannews.com/Result/1"
         payload = {'seating_no': seating_no}
 
@@ -49,37 +48,34 @@ def get_result():
             total_marks = "غير متوفر"
             subjects = []
 
-            # 1. تنظيف ودقة استخراج الاسم والشعبة من الـ Elements المباشرة
-            for el in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td', 'th', 'b', 'strong']):
+            # 1. استخراج الاسم الحقيقي وتنظيفه من نصوص الـ SEO
+            for el in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td', 'b', 'strong']):
                 txt = el.get_text(strip=True)
-                
-                # استخراج الاسم
-                if ("اسم الطالب" in txt or "الأسم" in txt or "الاسم" in txt) and student_name == "غير متوفر":
-                    # تنظيف النص
-                    clean_txt = re.sub(r'^(اسم الطالب|الأسم|الاسم)\s*:\s*', '', txt)
-                    # قطع النص لو اشتبك مع كلمة حالة أو شعبة
-                    clean_txt = re.split(r'(حالة|الشعبة|رقم|المجموع)', clean_txt)[0].strip()
-                    if clean_txt and len(clean_txt) > 3:
-                        student_name = clean_txt
+                if ("الأسم:" in txt or "الاسم:" in txt or "اسم الطالب:" in txt) and len(txt) < 150:
+                    # قص كل ما قبل النقطتين :
+                    clean = re.sub(r'^.*?(الأسم|الاسم|اسم الطالب)\s*:\s*', '', txt)
+                    # قص أي نصوص إعلانية تابعة للموقع
+                    clean = re.sub(r'جريدة الوطن|نتيجة الثانوية|حرصاً|عام 2026|تقديم|حصل', '', clean).strip()
+                    # أخذ كلمات الاسم فقط
+                    words = [w for w in clean.split() if re.match(r'^[\u0600-\u06FF]+$', w)]
+                    if len(words) >= 2:
+                        student_name = " ".join(words[:5])
+                        break
 
-                # استخراج الشعبة
-                if "الشعبة" in txt and branch == "غير متوفر":
-                    clean_branch = re.sub(r'^الشعبة\s*:\s*', '', txt)
-                    clean_branch = re.split(r'(حالة|الاسم|الأسم|رقم|المجموع)', clean_branch)[0].strip()
-                    if clean_branch and len(clean_branch) > 2:
-                        branch = clean_branch
+            # 2. استخراج الشعبة
+            for el in soup.find_all(['div', 'p', 'span', 'td']):
+                txt = el.get_text(strip=True)
+                if "الشعبة:" in txt and len(txt) < 80:
+                    clean_b = txt.split("الشعبة:")[-1].strip()
+                    words_b = [w for w in clean_b.split() if re.match(r'^[\u0600-\u06FF]+$', w)]
+                    if words_b:
+                        branch = " ".join(words_b[:2])
+                        break
 
-            # إذا لم يجد الشعبة صراحة، يتم الاستدلال عليها من المواد
-            if branch == "غير متوفر":
-                page_full_text = soup.get_text()
-                if "الرياضيات البحتة" in page_full_text or "مجموع الرياضيات" in page_full_text:
-                    branch = "علمي رياضة"
-                elif "الأحياء" in page_full_text and "غير مقرر" not in page_full_text:
-                    branch = "علمي علوم"
-                elif "التاريخ" in page_full_text and "غير مقرر" not in page_full_text:
-                    branch = "أدبي"
+            # 3. استخراج جدول المواد والدرجات
+            calculated_total = 0.0
+            has_calculated_marks = False
 
-            # 2. استخراج جدول المواد والدرجات
             for tr in soup.find_all('tr'):
                 tds = tr.find_all(['td', 'th'])
                 if len(tds) >= 2:
@@ -89,22 +85,52 @@ def get_result():
                     score_val = row_texts[1]
                     percentage_val = row_texts[2] if len(row_texts) > 2 else ""
 
-                    # تجاهل صف عناوين الجدول
                     if any(h in sub_name for h in ["المادة", "الدرجة", "النسبة", "رقم الجلوس"]):
                         continue
 
-                    # استخراج المجموع الكلي
-                    if "المجموع" in sub_name or "المجموع الكلي" in sub_name:
+                    # فحص المجموع الكلي إذا كان مذكوراً في الجدول
+                    if "المجموع" in sub_name:
                         total_marks = score_val
                         continue
 
-                    # إضافة المادة للقائمة
                     if sub_name and score_val and not any(s['subject'] == sub_name for s in subjects):
                         subjects.append({
                             "subject": sub_name,
                             "score": score_val,
                             "percentage": percentage_val
                         })
+
+                        # جمع الدرجات الفعلية للمواد المقررة لتأكيد المجموع
+                        if "غير مقرر" not in score_val and "/" in score_val:
+                            try:
+                                actual_score = float(score_val.split("/")[1].strip())
+                                calculated_total += actual_score
+                                has_calculated_marks = True
+                            except ValueError:
+                                pass
+
+            # 4. إذا لم يجد المجموع صراحة، يبحث عنه في بقية الصفحة أو يستخدم المجموع المحسوب
+            if total_marks == "غير متوفر":
+                for el in soup.find_all(['div', 'p', 'span', 'h3', 'h4']):
+                    txt = el.get_text(strip=True)
+                    if "المجموع الكلي" in txt or "المجموع:" in txt:
+                        match = re.search(r'(\d+(?:\.\d+)?)', txt)
+                        if match:
+                            total_marks = match.group(1)
+                            break
+
+            if total_marks == "غير متوفر" and has_calculated_marks:
+                total_marks = f"{calculated_total} / 410"
+
+            # تحديد الشعبة تلقائياً إذا لم تظهر
+            if branch == "غير متوفر":
+                subjects_str = " ".join([s['subject'] for s in subjects])
+                if "الرياضيات البحتة" in subjects_str:
+                    branch = "علمي رياضة"
+                elif "الأحياء" in subjects_str and not any(s['subject'] == 'الأحياء' and 'غير مقرر' in s['score'] for s in subjects):
+                    branch = "علمي علوم"
+                elif "التاريخ" in subjects_str and not any(s['subject'] == 'التاريخ' and 'غير مقرر' in s['score'] for s in subjects):
+                    branch = "أدبي"
 
             return jsonify({
                 "status": "success",
