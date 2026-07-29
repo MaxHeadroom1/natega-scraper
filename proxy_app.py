@@ -20,29 +20,50 @@ def get_result():
         if not seating_no:
             return jsonify({"status": "error", "message": "Please provide seating_no"}), 400
 
-        # استدعاء الرابط المباشر للنتيجة
-        target_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
+        target_url = "https://natega.elwatannews.com/"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': 'https://natega.elwatannews.com/'
+        }
+        
+        payload = {
+            'seating_no': seating_no,
+            'seating_no_btn': 'بحث'
         }
 
-        response = requests.get(target_url, headers=headers, timeout=15)
+        # إرسال طلب POST ببيانات النموذج
+        response = requests.post(target_url, data=payload, headers=headers, timeout=15)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # محاولة قراءة عناصر الجداول أولاً (حيث تُعرض النتائج عادة)
-            tables = soup.find_all('table')
-            tds = [td.text.strip() for td in soup.find_all('td') if td.text.strip()]
-            
-            # استخراج النصوص المهمة لمعرفتها
-            all_text = soup.get_text(separator=' ', strip=True)
+            page_text = soup.get_text()
+
+            # التحقق مما إذا كان رقم الجلوس خاطئاً أو غير موجود
+            if "رقم الجلوس غير صحيح" in page_text:
+                return jsonify({
+                    "status": "error",
+                    "message": "رقم الجلوس غير صحيح أو غير متوفر حالياً"
+                }), 404
+
+            # استخراج اسم الطالب والمجموع في حال توفرهم
+            student_name = "غير متوفر"
+            total_marks = "غير متوفر"
+
+            # البحث عن عناصر النتيجة في عناصر الـ HTML
+            name_elem = soup.find(class_=lambda c: c and 'name' in c.lower()) or soup.find('h3')
+            if name_elem and "بيانات" not in name_elem.text:
+                student_name = name_elem.text.strip()
+
+            degree_elem = soup.find(class_=lambda c: c and any(x in c.lower() for x in ['degree', 'total', 'mark']))
+            if degree_elem:
+                total_marks = degree_elem.text.strip()
 
             return jsonify({
                 "status": "success",
                 "seating_no": seating_no,
-                "extracted_tds": tds[:15],  # أول 15 عنصر داخل الجداول
-                "sample_text": all_text[:500]  # أول 500 حرف من نص الصفحة
+                "name": student_name,
+                "total": total_marks
             })
         else:
             return jsonify({"status": "error", "message": f"Status code: {response.status_code}"}), 502
