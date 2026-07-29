@@ -8,149 +8,325 @@ from bs4 import BeautifulSoup
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({"status": "success", "message": "API scraper is running successfully!"})
+FINAL_TOTAL = 320
 
-@app.route('/get_result', methods=['POST'])
+
+def normalize_text(value):
+    """تنظيف المسافات الزائدة مع الحفاظ على النص العربي."""
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def format_number(value):
+    """إظهار 50 بدل 50.0 مع الحفاظ على الكسور عند وجودها."""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def extract_labeled_value(soup, labels, stop_labels):
+    """
+    استخراج قيمة عنوان مثل:
+    الأسم: يوسف محمد فاروق إبراهيم
+    مع إيقاف الالتقاط عند بداية العنوان التالي مثل: حالة الطالب.
+    """
+    labels = sorted(labels, key=len, reverse=True)
+    stop_labels = sorted(stop_labels, key=len, reverse=True)
+
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    stop_pattern = "|".join(re.escape(label) for label in stop_labels)
+
+    pattern = re.compile(
+        rf"(?:{label_pattern})\s*[:：]\s*(.+?)"
+        rf"(?=\s*(?:{stop_pattern})\s*[:：]|$)"
+    )
+
+    candidates = []
+
+    for element in soup.find_all(
+        ["h1", "h2", "h3", "h4", "div", "p", "span", "td", "b", "strong"]
+    ):
+        text = normalize_text(element.get_text(" ", strip=True))
+
+        if text and any(label in text for label in labels):
+            candidates.append(text)
+
+    # حل احتياطي إذا كانت البيانات داخل عنصر كبير في الصفحة
+    candidates.append(normalize_text(soup.get_text(" ", strip=True)))
+
+    # نبدأ بأقصر عنصر لأنه غالبًا الأقرب للبيانات المطلوبة
+    for text in sorted(set(candidates), key=len):
+        match = pattern.search(text)
+
+        if match:
+            value = normalize_text(match.group(1)).strip(" :-：")
+
+            if value and len(value) <= 150:
+                return value
+
+    return None
+
+
+def extract_score(score_text):
+    """
+    استخراج درجة الطالب من صيغة مثل:
+    50 / 80
+    ويعيد 50 وليس 80.
+    """
+    if not score_text or "غير مقرر" in score_text:
+        return None
+
+    score_text = score_text.translate(
+        str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789.")
+    )
+
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)",
+        score_text
+    )
+
+    if not match:
+        return None
+
+    return float(match.group(1))
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "success",
+        "message": "API scraper is running successfully!"
+    })
+
+
+@app.route("/get_result", methods=["POST"])
 def get_result():
     try:
         data = request.get_json(silent=True) or {}
-        seating_no = data.get('seating_no')
+        seating_no = normalize_text(str(data.get("seating_no", "")))
 
         if not seating_no:
-            return jsonify({"status": "error", "message": "يرجى إدخال رقم الجلوس"}), 400
+            return jsonify({
+                "status": "error",
+                "message": "يرجى إدخال رقم الجلوس"
+            }), 400
 
         session = requests.Session()
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://natega.elwatannews.com',
-            'Referer': 'https://natega.elwatannews.com/'
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/webp,*/*;q=0.8"
+            ),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://natega.elwatannews.com",
+            "Referer": "https://natega.elwatannews.com/"
         }
 
         post_url = "https://natega.elwatannews.com/Result/1"
-        payload = {'seating_no': seating_no}
+        payload = {"seating_no": seating_no}
 
-        response = session.post(post_url, data=payload, headers=headers, timeout=15)
+        response = session.post(
+            post_url,
+            data=payload,
+            headers=headers,
+            timeout=15
+        )
 
         if response.status_code != 200 or len(response.text) < 500:
-            search_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
-            response = session.get(search_url, headers=headers, timeout=15)
+            search_url = (
+                "https://natega.elwatannews.com/"
+                f"?seating_no={seating_no}"
+            )
 
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+            response = session.get(
+                search_url,
+                headers=headers,
+                timeout=15
+            )
 
-            student_name = "غير متوفر"
-            branch = "غير متوفر"
-            student_status = "ناجح"
-            total_marks = "غير متوفر"
-            subjects = []
-
-            # 1. استخراج الاسم الحقيقي وتنظيفه من نصوص الـ SEO
-            for el in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td', 'b', 'strong']):
-                txt = el.get_text(strip=True)
-                if ("الأسم:" in txt or "الاسم:" in txt or "اسم الطالب:" in txt) and len(txt) < 150:
-                    # قص كل ما قبل النقطتين :
-                    clean = re.sub(r'^.*?(الأسم|الاسم|اسم الطالب)\s*:\s*', '', txt)
-                    # قص أي نصوص إعلانية تابعة للموقع
-                    clean = re.sub(r'جريدة الوطن|نتيجة الثانوية|حرصاً|عام 2026|تقديم|حصل', '', clean).strip()
-                    # أخذ كلمات الاسم فقط
-                    words = [w for w in clean.split() if re.match(r'^[\u0600-\u06FF]+$', w)]
-                    if len(words) >= 2:
-                        student_name = " ".join(words[:5])
-                        break
-
-            # 2. استخراج الشعبة
-            for el in soup.find_all(['div', 'p', 'span', 'td']):
-                txt = el.get_text(strip=True)
-                if "الشعبة:" in txt and len(txt) < 80:
-                    clean_b = txt.split("الشعبة:")[-1].strip()
-                    words_b = [w for w in clean_b.split() if re.match(r'^[\u0600-\u06FF]+$', w)]
-                    if words_b:
-                        branch = " ".join(words_b[:2])
-                        break
-
-            # 3. استخراج جدول المواد والدرجات
-            calculated_total = 0.0
-            has_calculated_marks = False
-
-            for tr in soup.find_all('tr'):
-                tds = tr.find_all(['td', 'th'])
-                if len(tds) >= 2:
-                    row_texts = [td.get_text(strip=True) for td in tds]
-                    
-                    sub_name = row_texts[0]
-                    score_val = row_texts[1]
-                    percentage_val = row_texts[2] if len(row_texts) > 2 else ""
-
-                    if any(h in sub_name for h in ["المادة", "الدرجة", "النسبة", "رقم الجلوس"]):
-                        continue
-
-                    # فحص المجموع الكلي إذا كان مذكوراً في الجدول
-                    if "المجموع" in sub_name:
-                        total_marks = score_val
-                        continue
-
-                    if sub_name and score_val and not any(s['subject'] == sub_name for s in subjects):
-                        subjects.append({
-                            "subject": sub_name,
-                            "score": score_val,
-                            "percentage": percentage_val
-                        })
-
-                        # جمع الدرجات الفعلية للمواد المقررة لتأكيد المجموع
-                        if "غير مقرر" not in score_val and "/" in score_val:
-                            try:
-                                actual_score = float(score_val.split("/")[1].strip())
-                                calculated_total += actual_score
-                                has_calculated_marks = True
-                            except ValueError:
-                                pass
-
-            # 4. إذا لم يجد المجموع صراحة، يبحث عنه في بقية الصفحة أو يستخدم المجموع المحسوب
-            if total_marks == "غير متوفر":
-                for el in soup.find_all(['div', 'p', 'span', 'h3', 'h4']):
-                    txt = el.get_text(strip=True)
-                    if "المجموع الكلي" in txt or "المجموع:" in txt:
-                        match = re.search(r'(\d+(?:\.\d+)?)', txt)
-                        if match:
-                            total_marks = match.group(1)
-                            break
-
-            if total_marks == "غير متوفر" and has_calculated_marks:
-                total_marks = f"{calculated_total} / 410"
-
-            # تحديد الشعبة تلقائياً إذا لم تظهر
-            if branch == "غير متوفر":
-                subjects_str = " ".join([s['subject'] for s in subjects])
-                if "الرياضيات البحتة" in subjects_str:
-                    branch = "علمي رياضة"
-                elif "الأحياء" in subjects_str and not any(s['subject'] == 'الأحياء' and 'غير مقرر' in s['score'] for s in subjects):
-                    branch = "علمي علوم"
-                elif "التاريخ" in subjects_str and not any(s['subject'] == 'التاريخ' and 'غير مقرر' in s['score'] for s in subjects):
-                    branch = "أدبي"
-
-            return jsonify({
-                "status": "success",
-                "seating_no": seating_no,
-                "name": student_name,
-                "branch": branch,
-                "student_status": student_status,
-                "total": total_marks,
-                "subjects": subjects
-            })
-
-        else:
+        if response.status_code != 200:
             return jsonify({
                 "status": "error",
-                "message": f"خطأ في الاتصال بالموقع: {response.status_code}"
+                "message": (
+                    "خطأ في الاتصال بالموقع: "
+                    f"{response.status_code}"
+                )
             }), 502
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        soup = BeautifulSoup(response.text, "html.parser")
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+        # استخراج الاسم مع التوقف قبل "حالة الطالب" وباقي البيانات
+        student_name = extract_labeled_value(
+            soup,
+            labels=["اسم الطالب", "الاسم", "الأسم"],
+            stop_labels=[
+                "حالة الطالب",
+                "الحالة",
+                "نوعية التعليم",
+                "نوع التعليم",
+                "الشعبة",
+                "رقم الجلوس",
+                "المجموع"
+            ]
+        ) or "غير متوفر"
+
+        # استخراج حالة الطالب بدل تثبيتها دائمًا على ناجح
+        student_status = extract_labeled_value(
+            soup,
+            labels=["حالة الطالب", "الحالة"],
+            stop_labels=[
+                "نوعية التعليم",
+                "نوع التعليم",
+                "الشعبة",
+                "رقم الجلوس",
+                "المجموع"
+            ]
+        ) or "غير متوفر"
+
+        branch = extract_labeled_value(
+            soup,
+            labels=["الشعبة"],
+            stop_labels=[
+                "رقم الجلوس",
+                "المجموع",
+                "اللغة العربية",
+                "المادة"
+            ]
+        ) or "غير متوفر"
+
+        subjects = []
+        calculated_total = 0.0
+        has_calculated_marks = False
+        website_total = "غير متوفر"
+
+        overall_total_labels = {
+            "المجموع",
+            "المجموع الكلي",
+            "إجمالي المجموع",
+            "الاجمالي",
+            "الإجمالي"
+        }
+
+        for row in soup.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+
+            if len(cells) < 2:
+                continue
+
+            row_texts = [
+                normalize_text(cell.get_text(" ", strip=True))
+                for cell in cells
+            ]
+
+            sub_name = row_texts[0]
+            score_val = row_texts[1]
+            percentage_val = (
+                row_texts[2] if len(row_texts) > 2 else ""
+            )
+
+            if not sub_name or not score_val:
+                continue
+
+            # تجاهل عنوان الجدول فقط
+            if sub_name in {
+                "المادة",
+                "اسم المادة",
+                "الدرجة",
+                "النسبة",
+                "النسبة المئوية",
+                "رقم الجلوس"
+            }:
+                continue
+
+            # لا نعتبر "مجموع الرياضيات البحتة" مجموعًا كليًا
+            if sub_name in overall_total_labels:
+                website_total = score_val
+                continue
+
+            if any(subject["subject"] == sub_name for subject in subjects):
+                continue
+
+            subjects.append({
+                "subject": sub_name,
+                "score": score_val,
+                "percentage": percentage_val
+            })
+
+            actual_score = extract_score(score_val)
+
+            if actual_score is not None:
+                calculated_total += actual_score
+                has_calculated_marks = True
+
+        # نعتمد مجموع المواد الفعلية ونجعله من 320
+        if has_calculated_marks:
+            total_marks = (
+                f"{format_number(calculated_total)} / {FINAL_TOTAL}"
+            )
+        else:
+            total_marks = website_total
+
+        # تحديد الشعبة تلقائيًا فقط إذا لم يذكرها الموقع
+        if branch in {"غير متوفر", "غير محدد"}:
+            subjects_text = " ".join(
+                subject["subject"] for subject in subjects
+            )
+
+            if any(
+                subject["subject"] == "مجموع الرياضيات البحتة"
+                and "غير مقرر" not in subject["score"]
+                for subject in subjects
+            ):
+                branch = "علمي رياضة"
+
+            elif any(
+                subject["subject"] == "الأحياء"
+                and "غير مقرر" not in subject["score"]
+                for subject in subjects
+            ):
+                branch = "علمي علوم"
+
+            elif any(
+                subject["subject"] in {"التاريخ", "الجغرافيا"}
+                and "غير مقرر" not in subject["score"]
+                for subject in subjects
+            ):
+                branch = "أدبي"
+
+        return jsonify({
+            "status": "success",
+            "seating_no": seating_no,
+            "name": student_name,
+            "branch": branch,
+            "student_status": student_status,
+            "total": total_marks,
+            "subjects": subjects
+        })
+
+    except requests.Timeout:
+        return jsonify({
+            "status": "error",
+            "message": "انتهت مهلة الاتصال بموقع النتيجة"
+        }), 504
+
+    except requests.RequestException as error:
+        return jsonify({
+            "status": "error",
+            "message": f"خطأ في الاتصال: {str(error)}"
+        }), 502
+
+    except Exception as error:
+        return jsonify({
+            "status": "error",
+            "message": str(error)
+        }), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
