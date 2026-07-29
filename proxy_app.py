@@ -5,7 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 
 app = Flask(__name__)
-CORS(app)  # للسماح بطلبات الـ HTML
+CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
@@ -23,21 +23,28 @@ def get_result():
         if not seating_no:
             return jsonify({"status": "error", "message": "Please provide seating_no"}), 400
 
-        target_url = "https://natega.elwatannews.com/"
-        payload = {'seating_no': seating_no}
+        # محاولة جلب النتيجة عبر GET أو POST حسب بناء موقع الوطن
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
 
-        # زيادات الـ timeout لتجنب Network Error عند بطء موقع الوطن
-        response = requests.post(target_url, data=payload, headers=headers, timeout=15)
+        # تجربة GET مع الـ seating_no كـ Query Parameter أو المسار المباشر
+        target_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
         
+        response = requests.get(target_url, headers=headers, timeout=15)
+        
+        # إذا أعاد 405 أو فشل، نجرب POST على الرابط المباشر
+        if response.status_code == 405:
+            target_url_post = "https://natega.elwatannews.com/result"
+            response = requests.post(target_url_post, data={'seating_no': seating_no}, headers=headers, timeout=15)
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # محاولة استخراج الاسم والمجموع بأكثر من طريقة
-            student_name_elem = soup.find('div', {'class': 'student-name'}) or soup.find('h3')
-            total_marks_elem = soup.find('div', {'class': 'total-degrees'}) or soup.find('span', {'class': 'degree'})
+            # البحث عن بيانات الطالب داخل عناصر الصفحة
+            student_name_elem = soup.find('div', {'class': 'student-name'}) or soup.find('h3') or soup.find('div', {'class': 'name'})
+            total_marks_elem = soup.find('div', {'class': 'total-degrees'}) or soup.find('span', {'class': 'degree'}) or soup.find('div', {'class': 'total'})
 
             student_name = student_name_elem.text.strip() if student_name_elem else "غير متوفر"
             total_marks = total_marks_elem.text.strip() if total_marks_elem else "غير متوفر"
