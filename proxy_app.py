@@ -23,31 +23,43 @@ def get_result():
         if not seating_no:
             return jsonify({"status": "error", "message": "Please provide seating_no"}), 400
 
-        # محاولة جلب النتيجة عبر GET أو POST حسب بناء موقع الوطن
+        # رابط جلب النتيجة من الوطن
+        target_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
 
-        # تجربة GET مع الـ seating_no كـ Query Parameter أو المسار المباشر
-        target_url = f"https://natega.elwatannews.com/?seating_no={seating_no}"
-        
         response = requests.get(target_url, headers=headers, timeout=15)
-        
-        # إذا أعاد 405 أو فشل، نجرب POST على الرابط المباشر
-        if response.status_code == 405:
-            target_url_post = "https://natega.elwatannews.com/result"
-            response = requests.post(target_url_post, data={'seating_no': seating_no}, headers=headers, timeout=15)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # البحث عن بيانات الطالب داخل عناصر الصفحة
-            student_name_elem = soup.find('div', {'class': 'student-name'}) or soup.find('h3') or soup.find('div', {'class': 'name'})
-            total_marks_elem = soup.find('div', {'class': 'total-degrees'}) or soup.find('span', {'class': 'degree'}) or soup.find('div', {'class': 'total'})
+            # 1. البحث عن اسم الطالب بمحددات دقيقة (مع استبعاد نصوص القوائم مثل 'تواصل معنا')
+            student_name = "غير متوفر"
+            name_candidates = soup.find_all(['h1', 'h2', 'h3', 'div', 'span'], class_=lambda c: c and any(x in c.lower() for x in ['name', 'student', 'st-name']))
+            for elem in name_candidates:
+                txt = elem.text.strip()
+                if txt and "تواصل" not in txt and "اتصل" not in txt and len(txt) > 3:
+                    student_name = txt
+                    break
+            
+            # إذا لم يجد بالكلاسات، يجرب البحث عن أول عنوان يحتوي نص معقول
+            if student_name == "غير متوفر":
+                for tag in ['h2', 'h3', 'h4']:
+                    found = soup.find(tag)
+                    if found and "تواصل" not in found.text:
+                        student_name = found.text.strip()
+                        break
 
-            student_name = student_name_elem.text.strip() if student_name_elem else "غير متوفر"
-            total_marks = total_marks_elem.text.strip() if total_marks_elem else "غير متوفر"
+            # 2. البحث عن المجموع الكلي
+            total_marks = "غير متوفر"
+            degree_candidates = soup.find_all(['div', 'span', 'td', 'p'], class_=lambda c: c and any(x in c.lower() for x in ['degree', 'total', 'mark', 'score', 'result']))
+            for elem in degree_candidates:
+                txt = elem.text.strip()
+                if txt and any(char.isdigit() for char in txt):
+                    total_marks = txt
+                    break
 
             return jsonify({
                 "status": "success",
@@ -56,10 +68,8 @@ def get_result():
                 "total": total_marks
             })
         else:
-            return jsonify({"status": "error", "message": f"الموقع المستهدف أعاد استجابة برقم {response.status_code}"}), 502
+            return jsonify({"status": "error", "message": f"Status code: {response.status_code}"}), 502
 
-    except requests.exceptions.Timeout:
-        return jsonify({"status": "error", "message": "استغرق الموقع المستهدف وقتاً طويلاً في الرد"}), 540
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
