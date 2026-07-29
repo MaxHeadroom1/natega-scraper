@@ -20,50 +20,75 @@ def get_result():
         if not seating_no:
             return jsonify({"status": "error", "message": "Please provide seating_no"}), 400
 
-        target_url = "https://natega.elwatannews.com/"
-        headers = {
+        # إنشاء Session للحفاظ على الكوكيز وحالة الاتصال
+        session = requests.Session()
+        session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
             'Referer': 'https://natega.elwatannews.com/'
-        }
-        
-        payload = {
-            'seating_no': seating_no,
-            'seating_no_btn': 'بحث'
-        }
+        })
 
-        # إرسال طلب POST ببيانات النموذج
-        response = requests.post(target_url, data=payload, headers=headers, timeout=15)
+        target_url = "https://natega.elwatannews.com/"
+
+        # 1. فتح الصفحة الرئيسية عبر GET لجلب أية حقول مخفية وكوكيز
+        get_response = session.get(target_url, timeout=10)
+        
+        payload = {'seating_no': seating_no}
+
+        if get_response.status_code == 200:
+            soup_get = BeautifulSoup(get_response.text, 'html.parser')
+            # البحث عن أشكال الـ form وحقول الحماية المخفية إن وجدت
+            form = soup_get.find('form')
+            if form:
+                action = form.get('action')
+                if action and action != '/':
+                    if action.startswith('http'):
+                        target_url = action
+                    else:
+                        target_url = f"https://natega.elwatannews.com{action}"
+                
+                # إدراج جميع الحقول المخفية داخل الـ payload
+                for hidden_input in form.find_all('input', type='hidden'):
+                    name = hidden_input.get('name')
+                    value = hidden_input.get('value', '')
+                    if name:
+                        payload[name] = value
+
+        # 2. إرسال طلب البحث الآن
+        response = session.post(target_url, data=payload, timeout=15)
+
+        # إذا رفض الـ POST، نقوم بتجربة GET المباشرة بالـ Query Parameter كحل بديل
+        if response.status_code == 405:
+            response = session.get(f"https://natega.elwatannews.com/?seating_no={seating_no}", timeout=15)
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             page_text = soup.get_text()
 
-            # التحقق مما إذا كان رقم الجلوس خاطئاً أو غير موجود
             if "رقم الجلوس غير صحيح" in page_text:
                 return jsonify({
                     "status": "error",
                     "message": "رقم الجلوس غير صحيح أو غير متوفر حالياً"
                 }), 404
 
-            # استخراج اسم الطالب والمجموع في حال توفرهم
             student_name = "غير متوفر"
             total_marks = "غير متوفر"
 
-            # البحث عن عناصر النتيجة في عناصر الـ HTML
-            name_elem = soup.find(class_=lambda c: c and 'name' in c.lower()) or soup.find('h3')
-            if name_elem and "بيانات" not in name_elem.text:
-                student_name = name_elem.text.strip()
-
-            degree_elem = soup.find(class_=lambda c: c and any(x in c.lower() for x in ['degree', 'total', 'mark']))
-            if degree_elem:
-                total_marks = degree_elem.text.strip()
+            # محاولة استخراج الاسم والمجموع
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'div', 'p', 'span', 'td']):
+                txt = tag.text.strip()
+                if "اسم الطالب" in txt or "الاسم" in txt:
+                    student_name = txt
+                if "المجموع" in txt or "الدرجة" in txt:
+                    total_marks = txt
 
             return jsonify({
                 "status": "success",
                 "seating_no": seating_no,
                 "name": student_name,
-                "total": total_marks
+                "total": total_marks,
+                "raw_preview": page_text[:300]
             })
         else:
             return jsonify({"status": "error", "message": f"Status code: {response.status_code}"}), 502
