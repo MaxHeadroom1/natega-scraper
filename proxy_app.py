@@ -31,44 +31,69 @@ def get_result():
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            page_text = soup.get_text()
-
-            # التحقق من أن النتيجة أعلنت أم أن الصفحة مجرد صفحة انتظار
-            if "تسهيل الوصول إلى النتيجة" in page_text or "سجل بياناتك" in page_text and "المجموع الكلي" not in page_text:
-                return jsonify({
-                    "status": "pending",
-                    "seating_no": seating_no,
-                    "message": "النتيجة لم تظهر رسمياً بعد أو يتوجب تسجيل البيانات على الموقع أولاً."
-                }), 200
-
-            # 1. استخراج اسم الطالب
+            
+            # 1. استخراج اسم الطالب بمرونة (البحث عن كلمة 'الأسم:' أو 'الاسم:')
             student_name = "غير متوفر"
-            name_tags = soup.find_all(['h1', 'h2', 'h3', 'div', 'td'], class_=lambda c: c and any(x in c.lower() for x in ['name', 'student']))
-            for tag in name_tags:
-                txt = tag.text.strip()
-                if txt and "بيانات" not in txt and "نتيجة" not in txt:
-                    student_name = txt
+            full_text = soup.get_text()
+            
+            for elem in soup.find_all(['h1', 'h2', 'h3', 'div', 'span', 'p', 'strong']):
+                txt = elem.text.strip()
+                if "الأسم:" in txt or "الاسم:" in txt:
+                    # تنظيف النص لاستخلاص الاسم فقط
+                    student_name = txt.replace("الأسم:", "").replace("الاسم:", "").strip()
                     break
 
-            # 2. استخراج المجموع
+            # 2. استخراج بيانات إضافية (الشعبة وحالة الطالب)
+            branch = "غير متوفر"
+            status_student = "ناجح"
+            for p in soup.find_all(['p', 'div', 'span', 'li']):
+                t = p.text.strip()
+                if "الشعبة:" in t:
+                    branch = t.replace("الشعبة:", "").strip()
+                if "حالة الطالب:" in t:
+                    status_student = t.replace("حالة الطالب:", "").strip()
+
+            # 3. استخراج المواد والدرجات من الجدول
+            subjects = []
             total_marks = "غير متوفر"
-            total_tags = soup.find_all(['div', 'span', 'td', 'p'], class_=lambda c: c and any(x in c.lower() for x in ['degree', 'total', 'score', 'result']))
-            for tag in total_tags:
-                txt = tag.text.strip()
-                if txt and any(char.isdigit() for char in txt):
-                    total_marks = txt
-                    break
+
+            tables = soup.find_all('table')
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cols = [td.text.strip() for td in row.find_all(['td', 'th'])]
+                    if len(cols) >= 2:
+                        # إذا كان صف المجموع
+                        if "المجموع" in cols[0] or "المجموع الكلي" in cols[0]:
+                            total_marks = cols[1]
+                        else:
+                            subjects.append({
+                                "subject": cols[0],
+                                "score": cols[1],
+                                "percentage": cols[2] if len(cols) > 2 else ""
+                            })
+
+            # إذا لم يُعثر على جدول المجموع، نبحث عنه في العناصر العادية
+            if total_marks == "غير متوفر":
+                for tag in soup.find_all(['div', 'span', 'p', 'td', 'h4']):
+                    txt = tag.text.strip()
+                    if "المجموع الكلي" in txt or "المجموع:" in txt:
+                        total_marks = txt
+                        break
 
             return jsonify({
                 "status": "success",
                 "seating_no": seating_no,
                 "name": student_name,
-                "total": total_marks
+                "branch": branch,
+                "student_status": status_student,
+                "total": total_marks,
+                "subjects": subjects
             })
         else:
             return jsonify({
                 "status": "error", 
-                "message": f"تعذر الاتصال بالموقع المستهدف (رمز: {response.status_code})"
+                "message": f"تعذر الاتصال بالموقع (رمز: {response.status_code})"
             }), 502
 
     except Exception as e:
